@@ -1,0 +1,7 @@
+{
+  "bot_token": "PASTE_YOUR_BOTFATHER_TOKEN_HERE",
+  "poll_interval_seconds": 90,
+  "reminder_minutes": [30, 5],
+  "digest_hour_utc": 7,
+  "league_tags": []
+}
