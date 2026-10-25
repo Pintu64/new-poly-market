@@ -33,7 +33,8 @@ import threading
 import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
-from http.server import BaseHTTPRequestHandler, TCPServer
+from http.server import BaseHTTPRequestHandler
+from socketserver import TCPServer
 
 
 def keepalive_server():
