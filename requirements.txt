@@ -1,0 +1,10 @@
+# Polymarket Football Telegram Bot
+#
+# This project uses ONLY the Python 3 standard library:
+#   json, os, re, sys, threading, time, urllib, datetime, html, math
+#
+# No external packages are required — just run:
+#   python src/bot.py
+#
+# Optionally pin nothing at all. This file exists so you know there is
+# nothing to install:   (empty on purpose)
