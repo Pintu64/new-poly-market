@@ -1,61 +1,106 @@
-"""Prediction engine: turns live Polymarket prices into a match report.
+"""Prediction engine — joint Poisson/Skellam model from live Polymarket prices.
 
-Approach
---------
-- 1X2: moneyline Yes prices are already probabilities; normalise them.
-- Over/Under goal lines: live market prices give P(total > line).  Fit an
-  expected total "lam" (Poisson) so the model reproduces the traded prices,
-  then output model probabilities for the full ladder: 0.5, 1, 1.5, 2, 2.5,
-  3, 3.5 ... including lines the exchange never lists.
-- BTTS: market price directly, cross-checked against the fitted Poisson
-  model with goals split between teams proportionally to 1X2 strength.
-- Expected score shown from the fitted lambdas and team strength split.
+Stage 1: fit expected total goals `lam` against the traded O/U goal lines.
+Stage 2: split lam between teams with share `s`, searching the s that best
+         reproduces the traded 1X2 moneyline through the Skellam goal model.
+Stage 3: build a correct-score matrix from (lam_home, lam_away) and derive
+         every market from it: the full over ladder (0.5…5.5), integer
+         lines, BTTS, raw expected score, and top exact scores.
 """
 
 import math
+
+K = 8  # max goals per side considered in the score matrix
+_pmf_cache = {}
 
 
 def poisson_pmf(k, lam):
     return math.exp(-lam) * lam ** k / math.factorial(k)
 
 
-def cdf(k_max, lam):
-    return sum(poisson_pmf(i, lam) for i in range(k_max + 1))
+def pmf_vec(lam, k_max=K):
+    key = round(lam, 4)
+    vec = _pmf_cache.get(key)
+    if vec is None:
+        vec = [poisson_pmf(i, key) for i in range(k_max + 1)]
+        _pmf_cache[key] = vec
+    return vec
 
 
 def over_prob(lam, line):
-    """P(total goals > line) under Poisson(lam).  Line may be .5 or integer."""
     if line == 0:
         return 1.0
     top = int(math.floor(line))
-    return max(0.0, min(1.0, 1.0 - cdf(top, lam)))
+    return max(0.0, min(1.0, 1.0 - sum(pmf_vec(lam)[: top + 1])))
 
 
-def fit_lambda(lines_prices):
-    """Least-squares Poisson fit of expected total goals over line prices."""
-    pts = [(line, p) for line, p in lines_prices.items() if 0.02 <= p <= 0.98]
+def fit_lambda(totals):
+    """Least-squares Poisson fit of expected total goals from O/U prices."""
+    pts = [(line, p) for line, p in totals.items() if 0.02 <= p <= 0.98]
     if len(pts) < 2:
         return None
 
     def err(lam):
         return sum((over_prob(lam, line) - p) ** 2 for line, p in pts)
 
-    # grid scan then golden refine (robust, no monotonicity assumptions)
     best_lam, best_err = 1.0, float("inf")
-    grid = [x / 100 for x in range(5, 801)]
-    for lam in grid:
+    for lam in [x / 100 for x in range(5, 801)]:
         e = err(lam)
         if e < best_err:
             best_err, best_lam = e, lam
-    lo2, hi2 = max(0.01, best_lam - 0.05), best_lam + 0.05
+    lo, hi = max(0.01, best_lam - 0.05), best_lam + 0.05
     for _ in range(60):
-        m1 = lo2 + (hi2 - lo2) / 3
-        m2 = hi2 - (hi2 - lo2) / 3
+        m1 = lo + (hi - lo) / 3
+        m2 = hi - (hi - lo) / 3
         if err(m1) < err(m2):
-            hi2 = m2
+            hi = m2
         else:
-            lo2 = m1
-    return round((lo2 + hi2) / 2, 4)
+            lo = m1
+    return round((lo + hi) / 2, 4)
+
+
+def score_matrix(lh, la, k_max=K):
+    ph, pa = pmf_vec(lh, k_max), pmf_vec(la, k_max)
+    return [[ph[i] * pa[j] for j in range(k_max + 1)] for i in range(k_max + 1)]
+
+
+def matrix_1x2(M):
+    home = draw = away = 0.0
+    for i, row in enumerate(M):
+        for j, p in enumerate(row):
+            if i > j:
+                home += p
+            elif i == j:
+                draw += p
+            else:
+                away += p
+    total = home + draw + away
+    return home / total, draw / total, away / total
+
+
+def matrix_over(M, line):
+    """P(total > line) from the score matrix (works for .5 and integer lines)."""
+    num = 0.0
+    for i, row in enumerate(M):
+        for j, p in enumerate(row):
+            if i + j > line:
+                num += p
+    tot = sum(sum(row) for row in M)
+    return max(0.0, min(1.0, num / (tot or 1.0)))
+
+
+def matrix_btts(M):
+    """P(both teams score): every cell (i>0 and j>0)."""
+    num = sum(
+        p for i, row in enumerate(M) for j, p in enumerate(row) if i > 0 and j > 0
+    )
+    tot = sum(sum(row) for row in M)
+    return max(0.0, min(1.0, num / (tot or 1.0)))
+
+
+def matrix_top_scores(M, n=3):
+    flat = [((i, j), p) for i, row in enumerate(M) for j, p in enumerate(row) if p > 0]
+    return sorted(flat, key=lambda kv: kv[1], reverse=True)[:n]
 
 
 def normalise_1x2(ml, draw_price):
@@ -68,76 +113,67 @@ def normalise_1x2(ml, draw_price):
     return probs
 
 
-def strength_split(ml, lam):
-    """Split lam between teams ~ proportional to their implied share."""
-    total = sum(p for _, p in ml) or 1.0
-    if len(ml) >= 2:
-        s1 = ml[0][1] / total
-    else:
-        s1 = 0.5
-    s1 = min(0.75, max(0.25, s1))
-    return lam * s1, lam * (1 - s1)
+def search_share(lam, targets):
+    """Find goal-share s so Skellam(lam*s, lam*(1-s)) best matches 1X2 targets."""
+    home_t, draw_t, away_t = targets
 
+    def err(s):
+        M = score_matrix(lam * s, lam * (1 - s), k_max=K)
+        h, d, a = matrix_1x2(M)
+        return (h - home_t) ** 2 + (d - draw_t) ** 2 + (a - away_t) ** 2
 
-def btts_model(lh, la):
-    return (1 - math.exp(-lh)) * (1 - math.exp(-la))
-
-
-def most_likely_result(probs_1x2):
-    if not probs_1x2:
-        return None
-    return max(probs_1x2, key=lambda kv: kv[1])
+    best_s, best_e = 0.5, float("inf")
+    for s in [x / 100 for x in range(20, 81)]:
+        e = err(s)
+        if e < best_e:
+            best_e, best_s = e, s
+    lo, hi = best_s - 0.01, best_s + 0.01
+    for _ in range(50):
+        m1 = lo + (hi - lo) / 3
+        m2 = hi - (hi - lo) / 3
+        if err(m1) < err(m2):
+            hi = m2
+        else:
+            lo = m1
+    s = round((lo + hi) / 2, 4)
+    return s, min(best_e, err(s))
 
 
 def build_prediction(rec):
-    """Prediction dict from a MatchRecord."""
+    """Full prediction dict from a MatchRecord."""
     ml = rec.get("moneyline") or []
     draw = rec.get("draw")
     totals = rec.get("totals") or {}
-    lam = fit_lambda(totals)
     probs_1x2 = normalise_1x2(ml, draw)
-    lh, la = (None, None)
-    btts_m = None
+    lam = fit_lambda(totals)
+
+    matrix = None
     if lam is not None and probs_1x2 and len(ml) >= 2:
-        lh, la = strength_split(ml, lam)
-        btts_m = btts_model(lh, la)
+        home_t, draw_t, away_t = [p for t, p in probs_1x2]
+        share, fit_err = search_share(lam, (home_t, draw_t, away_t))
+        lh, la = lam * share, lam * (1 - share)
+        matrix = score_matrix(lh, la, k_max=K)
 
     ladder = []
-    for line in (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5):
-        row = {"line": line}
-        if line in totals:
-            row["market"] = totals[line]
-        if lam is not None:
-            row["model"] = over_prob(lam, line)
-        if row.get("market") is not None or row.get("model") is not None:
+    lines_for_model = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5]
+    for line in lines_for_model:
+        row = {"line": line, "market": totals.get(line)}
+        if matrix is not None:
+            row["model"] = matrix_over(matrix, line)
+        elif row["market"] is not None:
+            row["model"] = None
+        if row["market"] is not None or row.get("model") is not None:
             ladder.append(row)
 
-    if lam is not None and probs_1x2 and len(ml) >= 2:
-        s1 = ml[0][1] / sum(p for _, p in ml)
-        s1 = min(0.75, max(0.25, s1))
-        exp_score = (round(lh, 1), round(la, 1))
-    else:
-        exp_score = None
+    exp_score = (round(lh, 2), round(la, 2)) if matrix is not None else None
 
     return {
         "probs_1x2": probs_1x2,
         "lam": lam,
         "ladder": ladder,
         "btts_market": rec.get("btts"),
-        "btts_model": btts_m,
+        "btts_model": matrix_btts(matrix) if matrix is not None else None,
         "exp_score": exp_score,
-        "best": most_likely_result(probs_1x2),
+        "top_scores": matrix_top_scores(matrix) if matrix is not None else [],
+        "best": max(probs_1x2, key=lambda kv: kv[1]) if probs_1x2 else None,
     }
-
-
-def pct(x):
-    return "--" if x is None else f"{round(x * 100)}%"
-
-
-def bar(p, width=18):
-    if p is None:
-        return "·" * width
-    if p <= 0.01:
-        return "·" * width
-    blocks = max(1, min(width, round(p * width)))
-    return "▓" * blocks + "·" * (width - blocks)
