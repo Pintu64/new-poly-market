@@ -1,0 +1,10 @@
+.git
+state.json
+state.json.tmp
+config.json
+bot.log
+bot.err.log
+__pycache__/
+*.pyc
+bot.log
+data/

@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: polymarket-football-bot
+    runtime: docker
+    plan: free
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false

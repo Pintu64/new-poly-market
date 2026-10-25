@@ -33,6 +33,27 @@ import threading
 import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, TCPServer
+
+
+def keepalive_server():
+    """Serve '/'; Render free web services need a bound port + pings."""
+    if not os.environ.get("RENDER"):
+        return
+    port = int(os.environ.get("PORT") or 10000)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    srv = TCPServer(("0.0.0.0", port), Handler)
+    srv.allow_reuse_address = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    log(f"keepalive server on :{port}")
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(BASE_DIR, "src"))
@@ -599,6 +620,7 @@ def main():
         save_json(STATE_PATH, persistent_state())
         log(f"backfilled {len(STATE['matches'])} matches")
     deserialize_state()
+    keepalive_server()
 
     threading.Thread(target=listener_loop, daemon=True).start()
     log(f"polling every {POLL_INTERVAL}s — {len(STATE['matches'])} matches in memory")
