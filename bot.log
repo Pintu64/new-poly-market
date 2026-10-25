@@ -1,0 +1,13 @@
+[08:31:53] connected as @polymarketppbot 🤖
+[08:31:53] first run: backfilling existing matches (no announcements)
+[08:33:01] backfilled 30 matches
+[08:33:01] listener started
+[08:33:01] polling every 90s — 30 matches in memory
+[08:33:02] command from 5825181230: /matches
+[08:33:06] command from 5825181230: /today
+[08:33:22] command from 5825181230: /signals
+[08:33:44] command from 5825181230: /today
+[08:33:45] command from 5825181230: /top
+[08:34:23] command from 5825181230: /predict América de Cali vs. Fortaleza CEIF
+[08:34:39] callback lad on col1-ad1-foc by 5825181230
+[08:34:48] callback ref on col1-ad1-foc by 5825181230

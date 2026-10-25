@@ -52,6 +52,16 @@ STATE_PATH = os.path.join(BASE_DIR, "state.json")
 STARTED_AT = time.time()
 
 
+def persistent_state():
+    """STATE copy safe for JSON (datetimes serialised, no live-only keys)."""
+    data = dict(STATE)
+    data["matches"] = {
+        base: {k: iso(v) for k, v in rec.items() if k != "last_prices"}
+        for base, rec in STATE["matches"].items()
+    }
+    return data
+
+
 def log(msg):
     stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
     print(f"[{stamp}] {msg}", flush=True)
@@ -336,12 +346,7 @@ def poll_once():
             del STATE["matches"][base]
 
     STATE["last_poll"] = datetime.now(timezone.utc).isoformat()
-    data = dict(STATE)
-    data["matches"] = {
-        b: {k: iso(v) for k, v in rec.items() if k not in ("last_prices",)}
-        for b, rec in STATE["matches"].items()
-    }
-    save_json(STATE_PATH, data)
+    save_json(STATE_PATH, persistent_state())
 
 
 # ------------------------------------------------------------- digest
@@ -551,7 +556,7 @@ def listener_loop():
             try:
                 if "callback_query" in update:
                     handle_callback(update["callback_query"])
-                    save_json(STATE_PATH, STATE)
+                    save_json(STATE_PATH, persistent_state())
                     continue
                 msg = update.get("message")
                 if not msg:
@@ -564,7 +569,7 @@ def listener_loop():
                 handle_command(chat_id, text)
             except Exception as exc:
                 log(f"update handler error: {exc}")
-            save_json(STATE_PATH, STATE)
+            save_json(STATE_PATH, persistent_state())
 
 
 # ------------------------------------------------------------- main
@@ -591,7 +596,7 @@ def main():
         STATE["matches"] = collect_matches()
         for rec in STATE["matches"].values():
             rec["announced"] = True
-        save_json(STATE_PATH, STATE)
+        save_json(STATE_PATH, persistent_state())
         log(f"backfilled {len(STATE['matches'])} matches")
     deserialize_state()
 

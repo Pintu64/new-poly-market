@@ -16,8 +16,8 @@ import urllib.request
 from datetime import datetime, timezone
 
 GAMMA_EVENTS = "https://gamma-api.polymarket.com/events"
-PAGE_SIZE = 500
-MAX_PAGES = 6
+PAGE_SIZE = 100     # Gamma API caps limit at 100
+MAX_PAGES = 40      # up to 4000 events scanned
 RETRY = 3
 UA = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
 
@@ -43,12 +43,20 @@ def gamma_events(params):
 
 def fetch_open_soccer_events():
     events = []
+    seen = set()
     for page in range(MAX_PAGES):
-        batch = gamma_events({
-            "tag_slug": "soccer", "active": "true", "closed": "false",
-            "archived": "false", "limit": PAGE_SIZE, "offset": page * PAGE_SIZE,
-        })
-        events.extend(batch)
+        try:
+            batch = gamma_events({
+                "tag_slug": "soccer", "active": "true", "closed": "false",
+                "archived": "false", "limit": PAGE_SIZE, "offset": page * PAGE_SIZE,
+            })
+        except RuntimeError:
+            break  # offset beyond available data
+        fresh_ids = {str(e.get("id")) for e in batch} - seen
+        if not fresh_ids:
+            break  # server cycling duplicates = end of data
+        seen |= fresh_ids
+        events.extend(e for e in batch if str(e.get("id")) in fresh_ids)
         if len(batch) < PAGE_SIZE:
             break
     return events
